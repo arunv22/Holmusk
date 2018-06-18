@@ -1,0 +1,367 @@
+---
+title: "Holmusk_Arun"
+author: "Arun"
+date: "June 18, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Loading required libraries
+```{r library, eval=FALSE}
+
+library(tidyverse)
+library(lubridate)
+library(forcats)
+library(cluster)
+library(factoextra)
+library(Rtsne)
+library(magrittr)
+library(caret)
+library(arules)
+library(rpart)
+library(glmnet)
+library(PerformanceAnalytics)
+library(MASS)
+library(lars)
+library(mlbench)
+```
+Background
+
+Clinical data are now widely been captured and used in the healthcare industry to better understand the patients and disease symptoms and are used to train machine learning models that can accurately identify similar profiles with lesser medical test/doctor consultation. Here we have clinical data of 3000 patients whose various details are captured including medical history,symptoms,medications,other relevant demographic details etc.  
+
+The task is to analyze the clinical and financial data of patients hospitalized for a certain condition and find insights about the drivers of cost of care.
+
+Data Explanation
+
+bill_amount:13600 observations with bill id and amount
+
+bill_id: 13600 observations with bill id,patient id and date of admission
+
+clinical_data: 3400 observations with 26 variables.(medical history,symptoms,medications,lab results)
+
+demographics: 3000 observations with 5 variables (patient id, gender,race,date of birth,resident status)
+
+Data given for date of admission from 2011-01-01 to 2015-12-28.
+
+Let'us load all the file into R 
+
+
+```{r load_files,eval=FALSE}
+bill_amount <- read.csv("D:/datasciencepositionatholmusk/bill_amount.csv",
+stringsAsFactors = T)
+
+bill_id <- read.csv("D:/datasciencepositionatholmusk/bill_id.csv",
+stringsAsFactors = T)
+
+clinical_data <- read.csv("D:/datasciencepositionatholmusk/clinical_data.csv",
+stringsAsFactors = T)
+
+demographics <- read.csv("D:/datasciencepositionatholmusk/demographics.csv",
+stringsAsFactors = T)
+
+```
+Each patient during his stay in the hospital; ie between date of admission and date of discharge can get multiple bill to be paid, identified by bill id and patient id.
+I have consolidated(sum) multiple bill generated for each patient id for same date of admission as 'tot_bill_amount' and the same is joined to the clinical data and demograohic data as additional columns.
+
+The final dataframe that is created is referred here as df.
+```{r left_join,eval=FALSE}
+bill<-left_join(bill_id,bill_amount)
+
+bill_patient_doa<-bill%>%group_by(patient_id,date_of_admission)%>%
+  summarise(tot_bill_amount=sum(amount))
+
+clinical_bill_patient_doa<-left_join(clinical_data,bill_patient_doa,
+                                     by=c('id'='patient_id','date_of_admission'))
+
+df<-left_join(clinical_bill_patient_doa,demographics,
+              by=c('id'='patient_id'))
+
+```
+Class of each variables are reassigned correctly for further analysis
+
+```{r glimpse,eval=FALSE}
+glimpse(df)
+
+cols_to_dates=c("date_of_admission","date_of_discharge","date_of_birth")
+cols_to_char=c("id")
+cols_to_factors=c(4:21)
+df[,cols_to_factors] <- lapply(df[,cols_to_factors],as.factor)
+df$id=as.character(df$id)
+df<-df%>%mutate(date_of_birth=ymd(date_of_birth),
+                date_of_admission=ymd(date_of_admission),
+                date_of_discharge=ymd(date_of_discharge) )
+glimpse(df)
+```
+Reassigning factor levels into correct and distinct factors.
+Age calculated from dob.
+```{r summary,eval=FALSE}
+
+lapply(df, function(x) {
+  
+  if (is.numeric(x)) return(summary(x))
+  
+  if (is.factor(x)) return(table(x))
+  
+})
+
+df<-df%>%mutate(resident_status=
+                  fct_collapse(
+                    resident_status,Singaporean=c("Singapore citizen","Singaporean")))%>%mutate(race=fct_collapse(race,
+                                             Chinese=c("chinese","Chinese"),
+                                             Indian=c("India","Indian")))%>%
+  mutate(gender=fct_collapse(gender,
+                             Female=c("Female","f"),
+                             Male=c("Male","m")))%>%
+  mutate(medical_history_3=fct_collapse(medical_history_3,
+                                        "0"=c("0","No"),
+                                        "1"=c("1","Yes")))
+age <- function(dob, age.day = today(), units = "years", floor = TRUE) {
+    calc.age = interval(dob, age.day) / duration(num = 1, units = units)
+    if (floor) return(as.integer(floor(calc.age)))
+    return(calc.age)
+}
+glimpse(df)
+df$Age=age(df$date_of_birth)
+df$date_of_birth<-NULL
+
+
+```
+Histograms and barplots
+
+```{r,eval=FALSE}
+#histogram for weight,height,Age,total_bill_amount, "lab_result_1","lab_result_2","lab_result_3" 
+
+lapply(X=c("weight","height","Age","tot_bill_amount","lab_result_1","lab_result_2","lab_result_3" ), FUN=function(s)
+  hist(df[,s],breaks = 40,xlab = paste(" ",s), main=paste("Histogram of", s)))
+
+mycols <- c("red","blue")
+
+#barplots for medical_history
+barplot(prop.table(sapply(df[4:10], 
+         function(x) table(factor(x,levels=0:1))),2),legend.text = T,col = mycols)
+
+#barplots for preop_medication
+barplot(prop.table(sapply(df[11:16], 
+         function(x) table(factor(x, levels=0:1))),2),legend.text = T,col = mycols)
+
+#barplots for symptom
+barplot(prop.table(sapply(df[17:21], 
+         function(x) table(factor(x, levels=0:1))),2),legend.text = T,col = mycols)
+
+#barplots for race
+
+df%>%count(race)%>%mutate(freq=n/sum(n))
+ggplot(data=df)+geom_bar(mapping=aes(x=race),position = "dodge")
+
+#barplots for resident_status
+
+df%>%count(resident_status)%>%mutate(freq=n/sum(n))
+ggplot(data=df)+geom_bar(mapping=aes(x=resident_status),position = "dodge")
+
+#barplots for gender
+
+df%>%count(gender)%>%mutate(freq=n/sum(n))
+ggplot(data=df)+geom_bar(mapping=aes(x=gender),position = "dodge")
+
+```
+Histograms plotted shows variables with skewed distributions that invalidates assumption of Gaussian distribution for general linear models; Box-Cox Transformation can be used to shift skewness and make it more Gaussian.
+
+```{r,eval=FALSE}
+#length of stay could be a possible candidate for cost and seriousness of disease 
+
+df<-df%>%
+  mutate(length_of_stay=as.numeric(date_of_discharge-date_of_admission))
+
+as.numeric(df$length_of_stay)
+
+# summarize all numeric columns
+summary(df[,c(22:27,31,32)])
+# calculate the pre-process parameters from the dataset
+preprocessParams <- preProcess(df[,c(22:27,31,32)], method=c("BoxCox"))
+# summarize transform parameters
+print(preprocessParams)
+# transform the dataset using the parameters
+transformed <- predict(preprocessParams, df[,c(22:27,31,32)])
+# summarize the transformed dataset (note pedigree and age)
+summary(transformed)
+# Better to keep the original dataset as such; new dataframe df1 has all the transformed variables with same variable name
+df1<-cbind(df[,c(1:21,28:30)],transformed)
+# Let's rescale and center the numerical variables to same scale.
+preprocessParams_cs <- preProcess(df1[,c(25:32)], method=c("center", "scale"))
+# summarize transform parameters
+print(preprocessParams_cs)
+# transform the dataset using the parameters
+transformed_cs <- predict(preprocessParams_cs,df1[,c(25:32)])
+# summarize the transformed dataset
+summary(transformed_cs)
+df1<-cbind(df1[,c(1:24)],transformed_cs)
+ 
+```
+Let's the same histograms again to check the removal of skewness
+
+```{r histograms_2,eval=FALSE}
+
+lapply(X=c("weight","height","Age","tot_bill_amount","lab_result_1","lab_result_2","lab_result_3" ), FUN=function(s)
+  hist(df1[,s],xlab = paste(" ",s), main=paste("Histogram of", s)))
+
+
+```
+```{r linear models,eval=FALSE}
+fit.ols<-lm(tot_bill_amount~.,data=df1[,c(4:32)])
+summary(fit.ols)
+sort(coef(fit.ols),decreasing =T)
+stepAIC_mod<-bootStepAIC::boot.stepAIC(object=fit.ols,data=data.frame(df1[,c(4:32)]))
+stepAIC_mod
+```
+Drivers of cost are explained clearly by the coefficients of the ols model. Sorting the coefficient descending wise gives a clear picture of factors that have higher effect on increasing the cost(most positive coefficient) as well as factors that have most effect in decreasing the cost/bill.
+
+If we consider the absolute value of coefficients; these are the top five factors influencing cost
+
+1. resident_status= Singaporean; decrease in cost
+2. resident_status = PR ; decrease in cost.
+3. symptom_5 = True ; increase in cost
+4. race = Malay; increase in cost
+5. medical_history_1 = True; increase in cost.
+
+
+Final Model is selected using StepAIC method which discards non-signifant factors.
+
+Final Model:
+
+tot_bill_amount ~ medical_history_1 + medical_history_2 + medical_history_3 + 
+    medical_history_4 + medical_history_5 + medical_history_6 + 
+    medical_history_7 + preop_medication_1 + preop_medication_2 + 
+    preop_medication_3 + preop_medication_5 + preop_medication_6 + 
+    symptom_1 + symptom_2 + symptom_3 + symptom_4 + symptom_5 + 
+    race + resident_status + weight + height + Age + length_of_stay
+    
+Discarded variables are lab_result_1,lab_result_2,lab_result_3,gender and preop_medication_4.
+
+
+```{r rpart model,eval=FALSE}
+
+rpart_mod=rpart(formula = tot_bill_amount~.,data=df[,c(4:32)])
+rpart.plot::rpart.plot(rpart_mod,cex=0.5)
+summary(rpart_mod)
+
+```
+reading from the rpart model plot shows that symptom_5(root node) hits the highest among the influencing factor contributing to higher cost. If you move down the split, it follows the same split at variables that we saw in the linear regression model.Interestingly we can see the value at which age splits. 
+
+Most disadvantaged class or group that get high bills to pay comes from patients who have symptom_5; are foreigners who belong to malay race. 
+
+
+
+
+Association Mining (Market Basket Analysis)
+Association mining is commonly used to make product recommendations by identifying products that are frequently bought together.Apriori algorithm makes it easier to find patterns or rules like which item/s is frequently occuring/bought with what item/s.In this context, to understand the medical history,preop_medication and symptoms better and find some pattern of co-occurence, I tried my luck with it.
+
+
+```{r association mining,eval=FALSE}
+
+tData <- as (df1[,c(4:21)], "transactions") # convert to 'transactions' class
+LIST(head(tData, 3))
+frequentItems <- eclat(tData, parameter = list(supp = 0.1, maxlen = 15))
+#inspect(frequentItems)
+itemFrequencyPlot(tData, topN=20, type="absolute", main="Item Frequency")
+```
+Interestingly, plotting item frequency plot helps to have a holistic view of and comparison of the frequency tables for each variables.
+Occurence of preop_medication_3 and 5 shows it's very common medication given.
+
+Let's understand it further
+```{r apriori preop_3,eval=FALSE}
+rules_preop_3 <- apriori (data=tData, parameter=list (supp=0.001,conf = 0.08), appearance = list (default="lhs",
+                   rhs="preop_medication_3=1"), control = list (verbose=F))
+
+rules_preop_3_sort <- sort (rules_preop_3, by="confidence", decreasing=TRUE) # 'high-confidence' rules.
+inspect(head(rules_preop_3_sort,10))
+```
+preop_medication_3 co-occurs with presence of medical_history 4,5.
+
+```{r apriori preop_5,eval=FALSE}
+rules_preop_5 <- apriori (data=tData, parameter=list (supp=0.001,conf = 0.08), appearance = list (default="lhs",
+                   rhs="preop_medication_5=1"), control = list (verbose=F))
+
+rules_preop_5_sort <- sort (rules_preop_5, by="confidence", decreasing=TRUE) # 'high-confidence' rules.
+inspect(head(rules_preop_5_sort,10))
+```
+Both preop_medication 3 and 5 may be given together for patients with medical history 3,4 and 5.
+
+Let's concentrate on the important variables(binary) that we got from the linear model and see how co-occurences patterns are coming.
+
+```{r,eval=FALSE}
+rules_along_with_sym5 <- apriori (data=tData, parameter=list (supp=0.001,conf = 0.15,minlen=2), appearance = list(default="rhs",lhs="symptom_5=1"), control = list (verbose=F))
+rules_along_with_sym5_sort <- sort (rules_along_with_sym5, by="confidence", decreasing=TRUE) # 'high-confidence' rules.
+inspect(head(rules_along_with_sym5_sort,25))
+```
+Even though association rules help see the cooccurences well, it is not advisable to read cooccurences as such since these symptoms or medications can be independent. To the safer side, we can still look factors that have value 1(event has occured). In this case symptom 5 has high co-occurences with symptom 4 and 2.     
+
+```{r,eval=FALSE}
+rules_along_with_medical_1 <- apriori (data=tData, parameter=list (supp=0.001,conf = 0.15,minlen=2), appearance = list(default="rhs",lhs="medical_history_1=1"), control = list (verbose=F))
+rules_along_with_medical_1_sort <- sort (rules_along_with_medical_1, by="confidence", decreasing=TRUE) # 'high-confidence' rules.
+inspect(head(rules_along_with_medical_1_sort,25))
+```
+Can we cluster patients into different groups?
+
+Clustering allows us to better understand how a sample might be comprised of distinct subgroups given a set of variables.
+Data of mixed type(continuous, ordinal, and nominal) can be clustered using Gower distance, partitioning around medoids, and silhouette width.
+
+```{r cluster,eval=FALSE}
+
+
+gower_dist <- daisy(df1[, c(4:32)],
+                    metric = "gower",
+                    type = list(logratio = 3))
+summary(gower_dist)
+gower_mat <- as.matrix(gower_dist)
+
+# Calculate silhouette width for many k using PAM
+
+sil_width <- c(NA)
+
+for(i in 2:10){
+  
+  pam_fit <- pam(gower_dist,
+                 diss = TRUE,
+                 k = i)
+  
+  sil_width[i] <- pam_fit$silinfo$avg.width
+  
+}
+
+# Plot sihouette width (higher is better)
+
+plot(1:10, sil_width,
+     xlab = "Number of clusters",
+     ylab = "Silhouette Width")
+lines(1:10, sil_width)
+
+#Looking at silhoutte plot optimal clusters are found at point of highest silhouette width . Cluster=2 is selected.
+pam_fit <- pam(gower_dist, diss = TRUE, k = 2)
+pam_results <- df1 %>%
+  dplyr::select(-id) %>%
+  mutate(cluster = pam_fit$clustering) %>%
+  group_by(cluster) %>%
+  do(the_summary = summary(.))
+
+pam_results$the_summary
+
+df1[pam_fit$medoids, ]
+
+tsne_obj <- Rtsne(gower_dist, is_distance = TRUE)
+
+tsne_data <- tsne_obj$Y %>%
+  data.frame() %>%
+  setNames(c("X", "Y")) %>%
+  mutate(cluster = factor(pam_fit$clustering),
+           name = df$id)
+
+  ggplot(aes(x = X, y = Y), data = tsne_data) +
+  geom_point(aes(color = cluster))
+
+df1<-df1%>%mutate(cluster = factor(pam_fit$clustering))
+table(df1$cluster)
+```
+Tsne plot shows there is no clear patterns in the data that can be used to group patients into different groups or cluster.Still,it had tried to cluster into 2 groups with some misclassifications/overlap.
+
